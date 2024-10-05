@@ -3,6 +3,8 @@ from gymnasium import spaces
 import numpy as np
 import pygame
 import time
+import tensorflow as tf
+from tensorflow.keras import layers
 
 
 # Helper function to calculate the angle to opponent
@@ -48,6 +50,62 @@ def opponent_decision(opponent_position, opponent_orientation, robot_position):
         return 1  # Turn left to face the robot
 
 
+# DQN Agent Class
+class DQNAgent:
+    def __init__(self, model):
+        self.model = model
+        self.gamma = 0.95  # Discount rate for future rewards
+        self.epsilon = 1.0  # Exploration rate (start with full exploration)
+        self.epsilon_min = 0.01  # Minimum exploration rate
+        self.epsilon_decay = 0.995  # Decay rate for epsilon
+        self.memory = []  # Replay memory for storing past experiences
+        self.batch_size = 32  # Size of training batches
+
+    def choose_action(self, state):
+        # Exploration-exploitation tradeoff
+        if np.random.rand() <= self.epsilon:
+            return np.random.choice(env.action_space.n)  # Choose random action
+        # Predict action based on current state
+        q_values = self.model.predict(state[np.newaxis, :], verbose=0)
+        return np.argmax(q_values[0])  # Return action with max Q-value
+
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def replay(self):
+        if len(self.memory) < self.batch_size:
+            return  # Don't train until we have enough samples
+
+        # Sample a batch of experiences from memory
+        minibatch = np.random.choice(self.memory, self.batch_size)
+
+        for state, action, reward, next_state, done in minibatch:
+            target = reward
+            if not done:
+                # Update Q-value using Bellman equation
+                target = reward + self.gamma * np.amax(self.model.predict(next_state[np.newaxis, :], verbose=0)[0])
+
+            # Update the Q-values for the selected action
+            q_values = self.model.predict(state[np.newaxis, :], verbose=0)
+            q_values[0][action] = target
+            self.model.fit(state[np.newaxis, :], q_values, verbose=0)
+
+        # Decrease exploration rate
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+
+# Create the model for the agent
+def create_model():
+    model = tf.keras.Sequential()
+    model.add(layers.InputLayer(input_shape=(6,)))  # The input shape is based on your observation space
+    model.add(layers.Dense(64, activation='relu'))
+    model.add(layers.Dense(64, activation='relu'))
+    model.add(layers.Dense(env.action_space.n, activation='linear'))  # Output size should match action space
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse')
+    return model
+
+
 # Custom environment class for Robot Sumo
 class RobotSumoEnv(gym.Env):
     def __init__(self):
@@ -55,7 +113,7 @@ class RobotSumoEnv(gym.Env):
 
         # Define the action and observation space
         self.action_space = spaces.Discrete(4)  # Move forward, turn left, turn right, move backward
-        self.observation_space = spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32)
 
         # Initialize positions of robot and opponent
         self.robot_position = np.array([0.5, 0.5])
@@ -110,7 +168,11 @@ class RobotSumoEnv(gym.Env):
         observation = np.concatenate(
             [self.robot_position, [self.robot_orientation], self.opponent_position, [self.opponent_orientation]])
 
-        return observation, 0, False, {}, {}
+        # Reward based on position relative to opponent (you can improve this logic)
+        reward = -np.linalg.norm(self.robot_position - self.opponent_position)
+        done = False  # Modify this when you want to signal the end of an episode (e.g., if someone is pushed out)
+
+        return observation, reward, done, {}, {}
 
     def render(self, mode='human'):
         # Convert the robot and opponent positions to Pygame coordinates
@@ -140,30 +202,34 @@ class RobotSumoEnv(gym.Env):
         pygame.quit()
 
 
-# Main function to test the environment
+# Main function to test the environment and train the DQN agent
 if __name__ == "__main__":
     env = RobotSumoEnv()
+    model = create_model()
+    agent = DQNAgent(model)
 
-    # Loop for 10 matches
-    for match in range(10):
-        print(f"Starting match {match + 1}")
-        cumulative_score = 0  # Track the cumulative score for each match
-        max_score = 1  # The maximum possible score for each match (if robot wins)
+    episodes = 1000  # Number of episodes to train the agent
+    for episode in range(episodes):
+        state, _ = env.reset()
+        state = np.array(state)
+        total_reward = 0
 
-        observation, info = env.reset()
-
-        # Each match will run for 50 steps
         for step in range(50):
-            # Get the robot's action based on its decision strategy
-            robot_action = robot_decision(env.robot_position, env.robot_orientation, env.opponent_position)
+            # Get the robot's action from the agent
+            action = agent.choose_action(state)
 
-            # Get the opponent's action based on its decision strategy
-            opponent_action = opponent_decision(env.opponent_position, env.opponent_orientation, env.robot_position)
+            # Take the action in the environment
+            next_state, reward, done, _, info = env.step(action)
+            next_state = np.array(next_state)
 
-            # Simulate a step for both robots
-            observation, reward, done, _, info = env.step(robot_action)
+            # Store the experience in the agent's memory
+            agent.remember(state, action, reward, next_state, done)
 
-            cumulative_score += reward  # Add the reward from each step to the cumulative score
+            # Train the agent
+            agent.replay()
+
+            state = next_state
+            total_reward += reward
 
             # Handle Pygame events to keep the window responsive
             for event in pygame.event.get():
@@ -174,13 +240,14 @@ if __name__ == "__main__":
             # Render the current state of the environment
             env.render()
 
-            # Slow down the simulation (optional)
-            time.sleep(0.2)
-
             if done:
-                print(f"Match {match + 1} over at step {step + 1}. Resetting environment.")
-                break  # Break the step loop when the match is over
+                print(f"Episode {episode + 1}, Total Reward: {total_reward}")
+                break
 
-        print(f"Match {match + 1} score: {cumulative_score}/{max_score}")
+        # Optionally slow down the simulation (remove for faster training)
+        time.sleep(0.1)
+
+    # Save the model after training
+    agent.model.save('robot_sumo_dqn_model.h5')
 
     env.close()
