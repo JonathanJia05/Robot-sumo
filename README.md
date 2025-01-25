@@ -1,1 +1,1 @@
-Using OpenAI Gymnasium and Pygame with TensorFlow to test and create robot control strategies for Japanese Robot Sumo matches. Implementing reinforcement learning so the robot can have dynamic strategies in response to opponent movement (as opposed to hard coded strategies).
+
